@@ -1,0 +1,137 @@
+"""LLM prompt templates.
+
+Only two prompts exist in this file — those are the only two LLM calls
+made anywhere in the pipeline, each called exactly once per run:
+
+  1. QUERY_GENERATOR — candidate_json -> N search queries
+  2. JUDGE_BATCH     — candidate_json + top-N job texts -> scores, ONE call
+
+Ported near-verbatim from career-agent's app/pipeline/prompts.py.
+"""
+
+QUERY_GENERATOR_SYSTEM = (
+    "You are a job search expert who understands that good jobs "
+    "are often listed under different titles than what candidates expect. "
+    "You write queries that surface live vacancy listings, never "
+    "career-advice or 'what is this profession' reference pages."
+)
+
+# A bare occupation title such as "agricultural engineer" returns Wikipedia,
+# government occupation profiles and university course pages — none of which
+# are vacancies, and all of which are then discarded downstream after being
+# crawled. Requiring a hiring word in every query, and naming the boards
+# explicitly, is what moves the result set from reference material to
+# postings. Query generation is one LLM call per run, so this costs nothing
+# extra; the saving is in crawls that no longer happen.
+#
+# candidate_target_roles / candidate_skills are passed in as their OWN
+# template variables (not just buried inside the candidate_json dump) and
+# each gets its own numbered mandatory slot below. Left to notice
+# target_roles/skills on its own inside a raw dict dump, the model
+# anchors on whichever field is loudest — usually current_role — and
+# every "diverse" query ends up being a rephrase of that one title. Naming
+# each role/skill explicitly and requiring 1:1 coverage is what actually
+# produces variety instead of relying on the model to bother looking.
+QUERY_GENERATOR_USER = """\
+Given this candidate profile, generate exactly {num_queries} diverse search queries
+to find relevant jobs across LinkedIn, Naukri, Wellfound, Indeed and company career pages.
+
+Every query MUST target live vacancy listings, not career-information pages.
+To do that, every query must contain at least one hiring word:
+"jobs", "hiring", "vacancy", "careers", or "openings".
+
+The candidate's target roles are: {candidate_target_roles}
+The candidate's top skills are: {candidate_skills}
+The candidate's target location(s) for this search are: {target_locations}
+Remote-only: {remote_only}
+Minimum acceptable salary: {min_salary_lpa}
+
+You MUST cover EVERY role in target roles at least once — do not write all
+{num_queries} queries about only one of them, even if one role sounds like
+the candidate's primary background. Spread queries across ALL listed roles
+before repeating any role.
+
+Include a mix of:
+- One role-title query PER target role listed above (e.g. 'Data Analyst jobs', 'Business Analyst hiring')
+- At least one skill-based query combining 2-3 of the listed skills (e.g. 'SQL Python analyst jobs')
+- A domain-specific query, if a domain is present
+- A seniority variant for the candidate's level
+- At least one query restricted to a job board, using a site: operator
+  (e.g. 'site:linkedin.com/jobs data analyst'). NOTE: this query is only
+  ever sent to a general web search engine, never to a structured job-board
+  API — skip the site: operator restriction on all your other queries.
+
+If more than one target location is given above, spread your
+location-qualified queries across ALL of them rather than writing every
+query for only the first one listed.
+
+If a target location is given above (not empty), append one of them to MOST of your
+role-title and skill-based queries (e.g. 'Data Analyst jobs in Bengaluru'),
+so search results are actually scoped to where the candidate wants to work
+rather than searched separately after the fact. If "Remote-only" is true,
+use "remote" instead of (or alongside) the location in those same queries.
+If no target location is given, do not invent one.
+
+Do NOT generate queries that would return definitions, salary guides, course
+listings, "how to become" articles, or professional-association pages.
+
+Return ONLY a JSON array of {num_queries} strings. No markdown. No explanation.
+Full candidate profile (for context only — role/skill coverage rules above
+take priority over anything you infer from this):
+{candidate_json}
+"""
+
+JUDGE_BATCH_SYSTEM = (
+    "You are a senior recruiter with 15 years of experience. You are given a "
+    "candidate profile and several raw job description excerpts (already "
+    "crawled from job board pages, unstructured). For EACH job, extract a "
+    "clean summary and score candidate fit. You return raw JSON only — no "
+    "prose before or after it, and no markdown fences."
+)
+
+JUDGE_BATCH_USER = """\
+Candidate profile:
+{candidate_json}
+
+Below are {num_jobs} job postings, each as raw text crawled from a job board page
+(may include some site navigation noise — ignore that and focus on the job content).
+
+{jobs_block}
+
+For EACH job in order (JOB 0, JOB 1, ... JOB {last_index}), evaluate candidate fit using
+this rubric (100 points total):
+  Skills match:        40 points  (required skills candidate has vs total required)
+  Experience fit:      20 points  (years and level match, not just years)
+  Domain relevance:    20 points  (industry/domain overlap)
+  Seniority alignment: 10 points  (overqualified and underqualified both lose points)
+  Location/remote fit: 10 points  (exact match=10, remote=8, mismatch=0)
+
+Some crawled pages turn out not to be vacancies at all (career guides, course
+pages, association homepages). If a page describes a profession rather than a
+specific opening, set "recommendation" to "Skip", "interview_probability" to 0,
+and say so in "one_line_reason". Do not invent a company or location for it.
+
+Keep "recommendation" numerically consistent with "interview_probability":
+  70-100 -> "Apply Immediately"
+  40-69  -> "Apply"
+  0-39   -> "Skip"
+
+Return ONLY a valid JSON array of exactly {num_jobs} objects, one per job, in the
+same order as the jobs were given, with this schema. Your reply must begin with
+"[" and end with "]" — no markdown, no reasoning, no explanation:
+[
+  {{
+    "title": "<cleaned job title>",
+    "company": "<company name, or empty string if not found>",
+    "location": "<city/region, or empty string>",
+    "is_remote": <true|false>,
+    "required_skills": [<up to 8 short strings>],
+    "interview_probability": <integer 0-100>,
+    "strengths": [<max 4 short strings, each under 30 chars>],
+    "gaps": [<max 3 short strings, each under 30 chars>],
+    "recommendation": <"Apply Immediately" | "Apply" | "Skip">,
+    "one_line_reason": "<one sentence, max 120 chars>"
+  }},
+  ...
+]
+"""

@@ -1,0 +1,83 @@
+"""Alembic environment.
+
+Imports every module's ORM metadata so autogenerate sees the full schema.
+Each module contributes its own tables; none are declared here.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from logging.config import fileConfig
+
+from alembic import context
+from sqlalchemy.ext.asyncio import async_engine_from_config
+from sqlalchemy.pool import NullPool
+
+from src.core.config import get_settings
+from src.core.db import Base
+
+# Importing a module's models registers its tables on Base.metadata.
+import src.resume_parsing.internal.models  # noqa: F401
+import src.career_recommendation.internal.models  # noqa: F401
+import src.job_discovery_matching.internal.models  # noqa: F401
+import src.career_report.internal.models  # noqa: F401
+import src.feedback.internal.models  # noqa: F401
+config = context.config
+if config.config_file_name is not None:
+    fileConfig(config.config_file_name)
+
+config.set_main_option("sqlalchemy.url", get_settings().database_url.replace("%", "%%"))
+
+target_metadata = Base.metadata
+
+
+def run_migrations_offline() -> None:
+    context.configure(
+        url=config.get_main_option("sqlalchemy.url"),
+        target_metadata=target_metadata,
+        literal_binds=True,
+        dialect_opts={"paramstyle": "named"},
+    )
+    with context.begin_transaction():
+        context.run_migrations()
+
+
+def _do_run_migrations(connection) -> None:
+    context.configure(connection=connection, target_metadata=target_metadata)
+    with context.begin_transaction():
+        context.run_migrations()
+
+
+async def _run_async_migrations() -> None:
+    # Same fix as src/core/db.py:get_engine() — Supabase's transaction-mode
+    # pooler (PgBouncer) doesn't support asyncpg's prepared statements, and
+    # this function builds its own separate engine via async_engine_from_config
+    # rather than reusing get_engine(), so it never inherited that fix.
+    # Without it: asyncpg.exceptions.DuplicatePreparedStatementError on the
+    # very first query (SELECT pg_catalog.version()) that SQLAlchemy issues
+    # to identify the server.
+    url = config.get_main_option("sqlalchemy.url", "")
+    is_asyncpg = url.startswith("postgresql+asyncpg")
+    connect_args = (
+        {"statement_cache_size": 0, "prepared_statement_cache_size": 0} if is_asyncpg else {}
+    )
+
+    connectable = async_engine_from_config(
+        config.get_section(config.config_ini_section, {}),
+        prefix="sqlalchemy.",
+        poolclass=NullPool,
+        connect_args=connect_args,
+    )
+    async with connectable.connect() as connection:
+        await connection.run_sync(_do_run_migrations)
+    await connectable.dispose()
+
+
+def run_migrations_online() -> None:
+    asyncio.run(_run_async_migrations())
+
+
+if context.is_offline_mode():
+    run_migrations_offline()
+else:
+    run_migrations_online()
