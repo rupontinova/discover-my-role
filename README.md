@@ -79,10 +79,6 @@ The platform is made up of three modules that share one candidate profile and on
 
 ## Getting started
 
-### Live version
-
-A hosted version of the app runs on AWS EC2 at **http://13.233.32.61:8080/**.
-
 ### Running locally
 
 This section walks through the full first-time setup, the optional Docker route, and the quick commands you'll use to start the app on later days.
